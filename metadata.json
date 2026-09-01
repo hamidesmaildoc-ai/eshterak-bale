@@ -1,0 +1,6 @@
+{
+  "name": "Bale Subscription Bot",
+  "description": "Admin panel and webhook server for a Bale subscription bot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
