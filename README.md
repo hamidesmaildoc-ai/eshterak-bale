@@ -34,8 +34,8 @@
 
 ۱. ابتدا سورس‌کد را روی سرور خود دانلود کنید (یا از طریق گیت کلون کنید):
 ```bash
-git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
-cd YOUR_REPOSITORY
+git clone https://github.com/hamidesmaildoc-ai/eshterak-bale.git
+cd eshterak-bale
 ```
 
 ۲. فایل نصب خودکار را با دسترسی روت (Root) اجرا کنید:
