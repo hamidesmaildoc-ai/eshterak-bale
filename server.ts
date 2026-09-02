@@ -2,11 +2,6 @@ import fs from "fs";
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
-import { db } from "./src/db/index.js";
-import { users, subscriptions, plans, settings, transactions } from "./src/db/schema.js";
-import { eq } from "drizzle-orm";
-
 // Initialize simple JSON database
 const DB_FILE = path.join(process.cwd(), "db.json");
 
@@ -62,91 +57,16 @@ const defaultDB: DB = {
 };
 
 async function readDB(): Promise<DB> {
-  const allUsers = await db.select().from(users);
-  const allSubs = await db.select().from(subscriptions);
-  const allPlans = await db.select().from(plans);
-  const allSettings = await db.select().from(settings);
-  const allTxs = await db.select().from(transactions);
-  
-  const mappedUsers = allUsers.map(u => ({
-    id: u.id,
-    firstName: u.firstName,
-    lastName: u.lastName,
-    username: u.username,
-    botState: u.botState,
-    subscriptionEnd: u.subscriptionEnd,
-    stateData: u.stateData,
-    subscriptions: allSubs.filter(s => s.userId === u.id)
-  }));
-  
-  const mappedSettings = { cardNumber: "", adminChatId: "" };
-  allSettings.forEach(s => {
-    mappedSettings[s.key] = s.value;
-  });
-  
-  return { users: mappedUsers, plans: allPlans, settings: mappedSettings, transactions: allTxs };
+  try {
+    const data = await fs.promises.readFile(DB_FILE, "utf-8");
+    return JSON.parse(data) as DB;
+  } catch (e) {
+    return defaultDB;
+  }
 }
 
 async function writeDB(data: DB) {
-  // Overwrite plans
-  if (data.plans.length > 0) {
-      await db.delete(plans);
-      for (const p of data.plans) {
-          await db.insert(plans).values({ id: p.id, name: p.name, durationDays: p.durationDays, price: p.price, description: p.description });
-      }
-  }
-  
-  // Overwrite settings
-  if (data.settings) {
-      await db.delete(settings);
-      if (data.settings.cardNumber) await db.insert(settings).values({ key: 'cardNumber', value: data.settings.cardNumber });
-      if (data.settings.adminChatId) await db.insert(settings).values({ key: 'adminChatId', value: data.settings.adminChatId });
-  }
-
-  // Overwrite users (simple approach: upsert user, delete subs, re-insert subs)
-  for (const u of data.users) {
-      await db.insert(users).values({
-          id: u.id,
-          firstName: u.firstName || null,
-          lastName: u.lastName || null,
-          username: u.username || null,
-          botState: u.botState || 'IDLE',
-          subscriptionEnd: u.subscriptionEnd || null,
-          stateData: (u as any).stateData || null
-      }).onConflictDoUpdate({
-          target: users.id,
-          set: {
-              firstName: u.firstName || null,
-              lastName: u.lastName || null,
-              username: u.username || null,
-              botState: u.botState || 'IDLE',
-              subscriptionEnd: u.subscriptionEnd || null,
-              stateData: (u as any).stateData || null
-          }
-      });
-
-      await db.delete(subscriptions).where(eq(subscriptions.userId, u.id));
-      if (u.subscriptions && u.subscriptions.length > 0) {
-          for (const sub of u.subscriptions) {
-              await db.insert(subscriptions).values({
-                  id: sub.id,
-                  userId: u.id,
-                  planId: sub.planId,
-                  planName: sub.planName,
-                  endDate: sub.endDate,
-                  joinLink: sub.joinLink || null,
-              });
-          }
-      }
-  }
-
-  // Transactions
-  if (data.transactions.length > 0) {
-      await db.delete(transactions);
-      for (const t of data.transactions) {
-          await db.insert(transactions).values({ id: t.id, userId: t.userId, planId: t.planId, status: t.status, date: t.date });
-      }
-  }
+  await fs.promises.writeFile(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
 }
 
 // Initial DB write if not exists
@@ -227,183 +147,7 @@ async function startServer() {
 
   // === ADMIN API ROUTES ===
 
-  app.get("/api/stats", async (req, res) => {
-    const db = await readDB();
-    const now = new Date();
-    
-    let activeSubsCount = 0;
-    
-    db.users.forEach(user => {
-      const subs = user.subscriptions || [];
-      const activeSubs = subs.filter(s => new Date(s.endDate) > now).length;
-      
-      if (activeSubs > 0) {
-        activeSubsCount += activeSubs;
-      } else if (user.subscriptionEnd && new Date(user.subscriptionEnd) > now) {
-        // Legacy fallback
-        activeSubsCount += 1;
-      }
-    });
-
-    res.json({
-      totalUsers: db.users.length,
-      activeSubscriptions: activeSubsCount,
-      totalPlans: db.plans.length,
-    });
-  });
-
-  app.get("/api/plans", async (req, res) => {
-    const db = await readDB();
-    res.json(db.plans);
-  });
-
-  app.post("/api/plans", async (req, res) => {
-    const db = await readDB();
-    const newPlan = { id: `plan_${Date.now()}`, ...req.body };
-    db.plans.push(newPlan);
-    await writeDB(db);
-    res.json(newPlan);
-  });
-
-  app.delete("/api/plans/:id", async (req, res) => {
-    const db = await readDB();
-    db.plans = db.plans.filter((p) => p.id !== req.params.id);
-    await writeDB(db);
-    res.json({ success: true });
-  });
-
-  app.get("/api/users", async (req, res) => {
-    const db = await readDB();
-    res.json(db.users);
-  });
-  
-  app.post("/api/users/cleanup-subscriptions", async (req, res) => {
-    const db = await readDB();
-    const now = new Date();
-    let removedCount = 0;
-    
-    db.users.forEach(user => {
-      if (user.subscriptions) {
-        const initialLen = user.subscriptions.length;
-        user.subscriptions = user.subscriptions.filter(sub => new Date(sub.endDate) > now);
-        removedCount += (initialLen - user.subscriptions.length);
-      }
-      
-      // Clear legacy active state if expired
-      if (user.subscriptionEnd && new Date(user.subscriptionEnd) <= now) {
-        user.subscriptionEnd = undefined;
-      }
-    });
-    
-    await writeDB(db);
-    res.json({ success: true, removedCount });
-  });
-
-  app.put("/api/users/:userId/subscriptions/:subId", async (req, res) => {
-    const db = await readDB();
-    const { addDays } = req.body;
-    const user = db.users.find((u: any) => u.id === req.params.userId);
-    
-    if (user && user.subscriptions && addDays) {
-        const subIndex = user.subscriptions.findIndex((s: any) => s.id === req.params.subId);
-        if (subIndex > -1) {
-            const sub = user.subscriptions[subIndex];
-            const currentDate = new Date(sub.endDate);
-            currentDate.setDate(currentDate.getDate() + addDays);
-            sub.endDate = currentDate.toISOString();
-            
-            // Also update legacy if it's the only one or something? It's fine to just update the specific sub.
-            if (user.subscriptions.length === 1) {
-                user.subscriptionEnd = currentDate.toISOString();
-            }
-            
-            await writeDB(db);
-            
-            sendBaleMessage(
-                user.id, 
-                `⏳ اشتراک "${sub.planName}" شما به مدت ${addDays} روز تمدید شد!\nتاریخ پایان جدید: ${currentDate.toLocaleDateString('fa-IR')}`
-            );
-            
-            return res.json({ success: true, user });
-        }
-    }
-    res.status(404).json({ error: "User or subscription not found" });
-  });
-
-  app.post("/api/users/:id/subscription", async (req, res) => {
-    const db = await readDB();
-    const { days } = req.body;
-    const userIndex = db.users.findIndex(u => u.id === req.params.id);
-    if (userIndex > -1 && days) {
-        const user = db.users[userIndex];
-        
-        if (!user.subscriptions) {
-            user.subscriptions = [];
-        }
-        
-        const subId = `GIFT_${Math.floor(1000 + Math.random() * 9000)}`;
-        const endDate = new Date();
-        endDate.setDate(endDate.getDate() + days);
-        
-        user.subscriptions.push({
-            id: subId,
-            planId: 'gift',
-            planName: 'هدیه مدیریت',
-            endDate: endDate.toISOString(),
-            joinLink: ''
-        });
-        
-        user.subscriptionEnd = endDate.toISOString(); // For legacy fallback
-        await writeDB(db);
-        
-        // Notify user
-        sendBaleMessage(
-            user.id, 
-            `🎁 یک هدیه اشتراک ${days} روزه از طرف مدیریت برای شما فعال شد!\nتاریخ پایان: ${endDate.toLocaleDateString('fa-IR')}`
-        );
-        
-        res.json({ success: true, user: db.users[userIndex] });
-    } else {
-        res.status(404).json({ error: "User not found or invalid days" });
-    }
-  });
-
-  app.get("/api/settings", async (req, res) => {
-    res.json((await readDB()).settings);
-  });
-  
-  app.post("/api/settings", async (req, res) => {
-    const db = await readDB();
-    db.settings = { ...db.settings, ...req.body };
-    await writeDB(db);
-    res.json({ success: true, settings: db.settings });
-  });
-
-  app.get("/api/debug/webhook", async (req, res) => {
-    try {
-      const r = await fetch(`${getBaleBaseUrl()}/getWebhookInfo`);
-      const data = await r.json();
-      res.json({ appUrl: process.env.APP_URL, webhookInfo: data, tokenSet: !!process.env.BALE_BOT_TOKEN });
-    } catch (e) {
-      res.status(500).json({ error: String(e) });
-    }
-  });
-
-  app.post("/api/settings/webhook", async (req, res) => {
-    let appUrl = process.env.APP_URL;
-    if (!appUrl) {
-      return res.status(400).json({ error: "APP_URL is not set in environment." });
-    }
-    // Fix for AI Studio: Ensure the webhook uses the public 'ais-pre' URL instead of the protected 'ais-dev' URL
-    appUrl = appUrl.replace("ais-dev", "ais-pre");
-    
-    const webhookUrl = `${appUrl}/api/webhook/bale`;
-    const result = await setBaleWebhook(webhookUrl);
-    res.json(result);
-  });
-
 async function processUpdate(update: any) {
-  if (!update) return;
 
   try {
     if (update.message) {
@@ -450,23 +194,19 @@ async function processUpdate(update: any) {
         return;
       }
       
-      if (text === "/setadmin") {
-          db.settings.adminChatId = chatId;
-          await writeDB(db);
-          await sendBaleMessage(chatId, "👑 شما به عنوان مدیر ربات تنظیم شدید!\n\nبرای ورود به پنل مدیریت داخل ربات، دستور /admin را ارسال کنید.");
-          return;
-      }
-      
+      const isAdmin = chatId === db.settings.adminChatId || (process.env.ADMIN_CHAT_ID && chatId === process.env.ADMIN_CHAT_ID);
+
       if (text === "/admin") {
-          if (db.settings.adminChatId === chatId) {
+          if (isAdmin) {
               user.botState = 'IDLE';
               await writeDB(db);
               await sendBaleMessage(chatId, "🔐 **پنل مدیریت ربات**\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:", {
                   inline_keyboard: [
-                      [{ text: "📊 آمار ربات", callback_data: "admin_stats" }],
-                      [{ text: "💳 تنظیم شماره کارت", callback_data: "admin_set_card" }],
-                      [{ text: "➕ افزودن پلن جدید", callback_data: "admin_add_plan" }],
-                      [{ text: "❌ حذف پلن‌ها", callback_data: "admin_delete_plan" }]
+                      [{ text: "📊 آمار ربات", callback_data: "admin_stats" }, { text: "💳 شماره کارت", callback_data: "admin_set_card" }],
+                      [{ text: "➕ افزودن پلن", callback_data: "admin_add_plan" }, { text: "❌ حذف پلن", callback_data: "admin_delete_plan" }],
+                      [{ text: "📣 ارسال پیام همگانی", callback_data: "admin_broadcast" }],
+                      [{ text: "🎁 تخصیص اشتراک دستی", callback_data: "admin_manual_sub" }],
+                      [{ text: "🔍 جستجوی کاربر", callback_data: "admin_search_user" }]
                   ]
               });
           } else {
@@ -533,6 +273,100 @@ async function processUpdate(update: any) {
           return;
       }
 
+      if (user.botState === 'ADMIN_BROADCAST') {
+          if (!text) {
+              await sendBaleMessage(chatId, "❌ لطفاً پیام متنی ارسال کنید.");
+              return;
+          }
+          user.botState = 'IDLE';
+          await writeDB(db);
+          let success = 0;
+          for (const u of db.users) {
+              try {
+                  await sendBaleMessage(u.id, `📣 **پیام مدیریت:**\n\n${text}`);
+                  success++;
+              } catch (e) {
+                  // Ignore errors for blocked users
+              }
+          }
+          await sendBaleMessage(chatId, `✅ پیام همگانی شما با موفقیت برای ${success} کاربر ارسال شد.`);
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_SEARCH_USER') {
+          const targetId = text.replace("@", "").trim();
+          const target = db.users.find(u => u.id === targetId || u.username?.toLowerCase() === targetId.toLowerCase());
+          user.botState = 'IDLE';
+          await writeDB(db);
+          if (target) {
+              const activeSubs = target.subscriptions ? target.subscriptions.filter((s: any) => new Date(s.endDate) > new Date()) : [];
+              let msg = `👤 **اطلاعات کاربر:**\n\n`;
+              msg += `شناسه: \`${target.id}\`\nنام: ${target.firstName} ${target.lastName || ''}\nیوزرنیم: @${target.username || 'ندارد'}\n`;
+              msg += `تعداد اشتراک‌های فعال: ${activeSubs.length}\n`;
+              activeSubs.forEach((s: any) => {
+                  msg += `- ${s.planName} (تا ${new Date(s.endDate).toLocaleDateString('fa-IR')})\n`;
+              });
+              await sendBaleMessage(chatId, msg);
+          } else {
+              await sendBaleMessage(chatId, "❌ کاربری با این مشخصات یافت نشد.");
+          }
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_MANUAL_SUB_USER') {
+          const target = db.users.find(u => u.id === text);
+          if (target) {
+              user.botState = 'IDLE';
+              await writeDB(db);
+              const buttons = db.plans.map(p => [{ text: p.name, callback_data: `admin_giveplan_${target.id}_${p.id}` }]);
+              await sendBaleMessage(chatId, `کاربر یافت شد: ${target.firstName} ${target.lastName || ''}\n\n🎁 لطفاً پلن مورد نظر برای تخصیص را انتخاب کنید:`, { inline_keyboard: buttons });
+          } else {
+              user.botState = 'IDLE';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "❌ کاربری با این شناسه عددی یافت نشد. لطفاً شناسه دقیق وارد کنید.");
+          }
+          return;
+      }
+
+      if (user.botState === 'ADMIN_MANUAL_SUB_LINK') {
+          try {
+              const data = JSON.parse(user.stateData);
+              const targetUserIndex = db.users.findIndex(u => u.id === data.userId);
+              const plan = db.plans.find(p => p.id === data.planId);
+              
+              if (targetUserIndex > -1 && plan) {
+                  const targetUser = db.users[targetUserIndex];
+                  if (!targetUser.subscriptions) targetUser.subscriptions = [];
+                  
+                  const endDate = new Date();
+                  endDate.setDate(endDate.getDate() + plan.durationDays);
+                  
+                  targetUser.subscriptions.push({
+                      id: `sub_${Date.now()}`,
+                      planId: plan.id,
+                      planName: plan.name,
+                      startDate: new Date().toISOString(),
+                      endDate: endDate.toISOString(),
+                      joinLink: text
+                  });
+                  targetUser.subscriptionEnd = endDate.toISOString(); // For legacy fallback
+                  
+                  user.botState = 'IDLE';
+                  user.stateData = "";
+                  await writeDB(db);
+                  
+                  await sendBaleMessage(targetUser.id, `🎉 **هدیه مدیریت!**\n\nاشتراک: ${plan.name}\nلینک اختصاصی شما:\n${text}\n\nیک اشتراک جدید از طرف مدیریت برای شما فعال شد!`);
+                  await sendBaleMessage(chatId, "✅ اشتراک دستی با موفقیت برای کاربر فعال و پیام ارسال شد.");
+              }
+          } catch (e) {
+              console.error(e);
+              user.botState = 'IDLE';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "❌ خطایی رخ داد.");
+          }
+          return;
+      }
+
       if (user.botState === 'AWAITING_RECEIPT') {
           const planId = user.stateData;
           if (update.message.photo && update.message.photo.length > 0) {
@@ -543,7 +377,7 @@ async function processUpdate(update: any) {
               
               await sendBaleMessage(chatId, "✅ فیش شما دریافت شد و در انتظار تایید مدیریت است.");
               
-              const adminChatId = db.settings.adminChatId;
+              const adminChatId = db.settings.adminChatId || process.env.ADMIN_CHAT_ID;
               if (adminChatId) {
                   await forwardBaleMessage(adminChatId, chatId, message.message_id);
                   const plan = db.plans.find(p => p.id === planId);
@@ -569,7 +403,7 @@ async function processUpdate(update: any) {
           await writeDB(db);
           await sendBaleMessage(chatId, "✅ پیام شما با موفقیت برای تیم پشتیبانی ارسال شد. در اسرع وقت پاسخ شما داده خواهد شد.");
           
-          const adminChatId = db.settings.adminChatId;
+          const adminChatId = db.settings.adminChatId || process.env.ADMIN_CHAT_ID;
           if (adminChatId) {
               await sendBaleMessage(
                   adminChatId, 
@@ -715,33 +549,63 @@ async function processUpdate(update: any) {
               await sendBaleMessage(chatId, "❌ تراکنش با موفقیت رد شد.");
           }
       } else if (data === "admin_stats") {
-          if (chatId === db.settings.adminChatId) {
+          if (isAdmin) {
               const activeSubsCount = db.users.reduce((acc, u) => acc + (u.subscriptions ? u.subscriptions.filter((s: any) => new Date(s.endDate) > new Date()).length : 0), 0);
               await sendBaleMessage(chatId, `📊 **آمار ربات:**\n\n👥 تعداد کل کاربران: ${db.users.length}\n✅ اشتراک‌های فعال: ${activeSubsCount}\n🎁 تعداد پلن‌ها: ${db.plans.length}`);
           }
       } else if (data === "admin_set_card") {
-          if (chatId === db.settings.adminChatId) {
+          if (isAdmin) {
               user.botState = 'ADMIN_SET_CARD';
               await writeDB(db);
               await sendBaleMessage(chatId, `💳 شماره کارت فعلی:\n\`${db.settings.cardNumber}\`\n\nلطفاً شماره کارت جدید را تایپ کرده و ارسال کنید (یا برای انصراف /start را بزنید):`);
           }
       } else if (data === "admin_add_plan") {
-          if (chatId === db.settings.adminChatId) {
+          if (isAdmin) {
               user.botState = 'ADMIN_ADD_PLAN_NAME';
               await writeDB(db);
               await sendBaleMessage(chatId, "➕ **افزودن پلن جدید**\n\nلطفاً نام پلن را وارد کنید (مثلاً: اشتراک ۱ ماهه):");
           }
       } else if (data === "admin_delete_plan") {
-          if (chatId === db.settings.adminChatId) {
+          if (isAdmin) {
               const buttons = db.plans.map(p => [{ text: `❌ حذف: ${p.name}`, callback_data: `admin_del_plan_${p.id}` }]);
               await sendBaleMessage(chatId, "🗑 **کدام پلن را می‌خواهید حذف کنید؟**", { inline_keyboard: buttons });
           }
       } else if (data.startsWith("admin_del_plan_")) {
-          if (chatId === db.settings.adminChatId) {
+          if (isAdmin) {
               const pId = data.replace("admin_del_plan_", "");
               db.plans = db.plans.filter(p => p.id !== pId);
               await writeDB(db);
               await sendBaleMessage(chatId, "✅ پلن با موفقیت حذف شد.");
+          }
+      } else if (data === "admin_broadcast") {
+          if (isAdmin) {
+              user.botState = 'ADMIN_BROADCAST';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "📣 **ارسال پیام همگانی**\n\nلطفاً پیام متنی خود را بفرستید تا برای همه کاربران ربات ارسال شود:\n(برای انصراف /start را بزنید)");
+          }
+      } else if (data === "admin_search_user") {
+          if (isAdmin) {
+              user.botState = 'ADMIN_SEARCH_USER';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "🔍 **جستجوی کاربر**\n\nلطفاً شناسه عددی (ID) یا یوزرنیم کاربر را با @ بفرستید:");
+          }
+      } else if (data === "admin_manual_sub") {
+          if (isAdmin) {
+              user.botState = 'ADMIN_MANUAL_SUB_USER';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "🎁 **تخصیص اشتراک دستی**\n\nلطفاً شناسه عددی (ID) کاربری که می‌خواهید به او اشتراک هدیه دهید را بفرستید:");
+          }
+      } else if (data.startsWith("admin_giveplan_")) {
+          if (isAdmin) {
+              const parts = data.replace("admin_giveplan_", "").split("_");
+              const targetId = parts[0];
+              const planId = parts.slice(1).join("_");
+              
+              user.botState = 'ADMIN_MANUAL_SUB_LINK';
+              user.stateData = JSON.stringify({ userId: targetId, planId: planId });
+              await writeDB(db);
+              
+              await sendBaleMessage(chatId, "🔗 لطفاً لینک اختصاصی (لینک اتصال VPN) را برای این کاربر بفرستید تا به همراه اشتراک برایش ارسال شود:");
           }
       }
     }
@@ -905,21 +769,6 @@ startPolling();
         </html>
       `);
   });
-
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", async (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
