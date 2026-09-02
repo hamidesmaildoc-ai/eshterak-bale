@@ -25,6 +25,9 @@ apt-get install -yqq nginx certbot python3-certbot-nginx
 
 echo ""
 echo "[2/4] Configuring Nginx Reverse Proxy..."
+# Ensure directories exist
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+
 # Create Nginx configuration
 cat <<NGINX_EOF > /etc/nginx/sites-available/$DOMAIN
 server {

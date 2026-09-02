@@ -221,7 +221,7 @@ async function setBaleWebhook(url: string) {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
 
   app.use(express.json());
 
@@ -450,7 +450,89 @@ async function processUpdate(update: any) {
         return;
       }
       
+      if (text === "/setadmin") {
+          db.settings.adminChatId = chatId;
+          await writeDB(db);
+          await sendBaleMessage(chatId, "👑 شما به عنوان مدیر ربات تنظیم شدید!\n\nبرای ورود به پنل مدیریت داخل ربات، دستور /admin را ارسال کنید.");
+          return;
+      }
+      
+      if (text === "/admin") {
+          if (db.settings.adminChatId === chatId) {
+              user.botState = 'IDLE';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "🔐 **پنل مدیریت ربات**\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:", {
+                  inline_keyboard: [
+                      [{ text: "📊 آمار ربات", callback_data: "admin_stats" }],
+                      [{ text: "💳 تنظیم شماره کارت", callback_data: "admin_set_card" }],
+                      [{ text: "➕ افزودن پلن جدید", callback_data: "admin_add_plan" }],
+                      [{ text: "❌ حذف پلن‌ها", callback_data: "admin_delete_plan" }]
+                  ]
+              });
+          } else {
+              await sendBaleMessage(chatId, "⛔ شما به این بخش دسترسی ندارید.");
+          }
+          return;
+      }
+      
       // Handle User states
+      if (user.botState === 'ADMIN_SET_CARD') {
+          db.settings.cardNumber = text;
+          user.botState = 'IDLE';
+          await writeDB(db);
+          await sendBaleMessage(chatId, "✅ شماره کارت با موفقیت تغییر کرد.");
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_ADD_PLAN_NAME') {
+          user.stateData = text;
+          user.botState = 'ADMIN_ADD_PLAN_PRICE';
+          await writeDB(db);
+          await sendBaleMessage(chatId, "💵 حالا قیمت این پلن را به تومان (فقط عدد) وارد کنید:");
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_ADD_PLAN_PRICE') {
+          const price = parseInt(text);
+          if (isNaN(price)) {
+              await sendBaleMessage(chatId, "❌ قیمت باید فقط عدد باشد. دوباره وارد کنید:");
+              return;
+          }
+          user.stateData = JSON.stringify({ name: user.stateData, price: price });
+          user.botState = 'ADMIN_ADD_PLAN_DAYS';
+          await writeDB(db);
+          await sendBaleMessage(chatId, "⏳ حالا مدت زمان این پلن را به روز (فقط عدد) وارد کنید (مثلاً 30):");
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_ADD_PLAN_DAYS') {
+          const days = parseInt(text);
+          if (isNaN(days)) {
+              await sendBaleMessage(chatId, "❌ مدت زمان باید فقط عدد باشد. دوباره وارد کنید:");
+              return;
+          }
+          try {
+              const partialPlan = JSON.parse(user.stateData);
+              const newPlan = {
+                  id: `plan_${Date.now()}`,
+                  name: partialPlan.name,
+                  price: partialPlan.price,
+                  durationDays: days,
+                  description: partialPlan.name
+              };
+              db.plans.push(newPlan);
+              user.botState = 'IDLE';
+              user.stateData = "";
+              await writeDB(db);
+              await sendBaleMessage(chatId, `✅ پلن جدید "${newPlan.name}" با موفقیت اضافه شد!`);
+          } catch (e) {
+              user.botState = 'IDLE';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "❌ خطایی رخ داد. عملیات لغو شد.");
+          }
+          return;
+      }
+
       if (user.botState === 'AWAITING_RECEIPT') {
           const planId = user.stateData;
           if (update.message.photo && update.message.photo.length > 0) {
@@ -631,6 +713,35 @@ async function processUpdate(update: any) {
                   ]
               });
               await sendBaleMessage(chatId, "❌ تراکنش با موفقیت رد شد.");
+          }
+      } else if (data === "admin_stats") {
+          if (chatId === db.settings.adminChatId) {
+              const activeSubsCount = db.users.reduce((acc, u) => acc + (u.subscriptions ? u.subscriptions.filter((s: any) => new Date(s.endDate) > new Date()).length : 0), 0);
+              await sendBaleMessage(chatId, `📊 **آمار ربات:**\n\n👥 تعداد کل کاربران: ${db.users.length}\n✅ اشتراک‌های فعال: ${activeSubsCount}\n🎁 تعداد پلن‌ها: ${db.plans.length}`);
+          }
+      } else if (data === "admin_set_card") {
+          if (chatId === db.settings.adminChatId) {
+              user.botState = 'ADMIN_SET_CARD';
+              await writeDB(db);
+              await sendBaleMessage(chatId, `💳 شماره کارت فعلی:\n\`${db.settings.cardNumber}\`\n\nلطفاً شماره کارت جدید را تایپ کرده و ارسال کنید (یا برای انصراف /start را بزنید):`);
+          }
+      } else if (data === "admin_add_plan") {
+          if (chatId === db.settings.adminChatId) {
+              user.botState = 'ADMIN_ADD_PLAN_NAME';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "➕ **افزودن پلن جدید**\n\nلطفاً نام پلن را وارد کنید (مثلاً: اشتراک ۱ ماهه):");
+          }
+      } else if (data === "admin_delete_plan") {
+          if (chatId === db.settings.adminChatId) {
+              const buttons = db.plans.map(p => [{ text: `❌ حذف: ${p.name}`, callback_data: `admin_del_plan_${p.id}` }]);
+              await sendBaleMessage(chatId, "🗑 **کدام پلن را می‌خواهید حذف کنید؟**", { inline_keyboard: buttons });
+          }
+      } else if (data.startsWith("admin_del_plan_")) {
+          if (chatId === db.settings.adminChatId) {
+              const pId = data.replace("admin_del_plan_", "");
+              db.plans = db.plans.filter(p => p.id !== pId);
+              await writeDB(db);
+              await sendBaleMessage(chatId, "✅ پلن با موفقیت حذف شد.");
           }
       }
     }
