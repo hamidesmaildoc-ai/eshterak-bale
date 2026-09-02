@@ -309,7 +309,7 @@ async function processUpdate(update: any) {
               msg += `شناسه: \`${target.id}\`\nنام: ${target.firstName} ${target.lastName || ''}\nیوزرنیم: @${target.username || 'ندارد'}\n`;
               msg += `تعداد اشتراک‌های فعال: ${activeSubs.length}\n`;
               activeSubs.forEach((s: any) => {
-                  msg += `- ${s.planName} (تا ${new Date(s.endDate).toLocaleDateString('fa-IR')})\n`;
+                  msg += `- ${s.planName} (شناسه: \`${s.id}\` - تا ${new Date(s.endDate).toLocaleDateString('fa-IR')})\n`;
               });
               await sendBaleMessage(chatId, msg);
           } else {
@@ -347,7 +347,7 @@ async function processUpdate(update: any) {
                   endDate.setDate(endDate.getDate() + plan.durationDays);
                   
                   targetUser.subscriptions.push({
-                      id: `sub_${Date.now()}`,
+                      id: data.subId || `SUB_${Math.floor(1000 + Math.random() * 9000)}`,
                       planId: plan.id,
                       planName: plan.name,
                       startDate: new Date().toISOString(),
@@ -451,7 +451,7 @@ async function processUpdate(update: any) {
                       targetUser.subscriptions = [];
                   }
                   
-                  const subId = `SUB_${Math.floor(1000 + Math.random() * 9000)}`;
+                  const subId = tx.subId || `SUB_${Math.floor(1000 + Math.random() * 9000)}`;
                   const endDate = new Date();
                   endDate.setDate(endDate.getDate() + plan.durationDays);
                   
@@ -534,10 +534,20 @@ async function processUpdate(update: any) {
       } else if (data.startsWith("approve_tx_")) {
           const txId = data.replace("approve_tx_", "");
           if (user) {
+              const txIndex = db.transactions.findIndex((t: any) => t.id === txId);
+              let subId = `SUB_${Math.floor(1000 + Math.random() * 9000)}`;
+              if (txIndex > -1) {
+                  if (!db.transactions[txIndex].subId) {
+                      db.transactions[txIndex].subId = subId;
+                  } else {
+                      subId = db.transactions[txIndex].subId;
+                  }
+              }
+
               user.botState = 'AWAITING_LINK';
               user.stateData = txId;
               await writeDB(db);
-              await sendBaleMessage(chatId, "🔗 لطفاً لینک اشتراک اختصاصی را برای این کاربر ارسال کنید. (به محض ارسال این پیام برای کاربر فروارد می‌شود)");
+              await sendBaleMessage(chatId, `🔗 لطفاً لینک اشتراک اختصاصی را برای این کاربر ارسال کنید. (به محض ارسال این پیام برای کاربر فروارد می‌شود)\n\n🔑 **شناسه یکتای اشتراک:** \`${subId}\``);
           }
       } else if (data.startsWith("reject_tx_")) {
           const txId = data.replace("reject_tx_", "");
@@ -605,12 +615,13 @@ async function processUpdate(update: any) {
               const parts = data.replace("admin_giveplan_", "").split("_");
               const targetId = parts[0];
               const planId = parts.slice(1).join("_");
+              const subId = `SUB_${Math.floor(1000 + Math.random() * 9000)}`;
               
               user.botState = 'ADMIN_MANUAL_SUB_LINK';
-              user.stateData = JSON.stringify({ userId: targetId, planId: planId });
+              user.stateData = JSON.stringify({ userId: targetId, planId: planId, subId: subId });
               await writeDB(db);
               
-              await sendBaleMessage(chatId, "🔗 لطفاً لینک اختصاصی (لینک اتصال VPN) را برای این کاربر بفرستید تا به همراه اشتراک برایش ارسال شود:");
+              await sendBaleMessage(chatId, `🔗 لطفاً لینک اختصاصی (لینک اتصال VPN) را برای این کاربر بفرستید تا به همراه اشتراک برایش ارسال شود:\n\n🔑 **شناسه یکتای اشتراک:** \`${subId}\``);
           }
       }
     }
