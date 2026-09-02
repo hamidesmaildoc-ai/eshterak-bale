@@ -1,3 +1,4 @@
+import "dotenv/config";
 import fs from "fs";
 import express from "express";
 import path from "path";
@@ -148,15 +149,19 @@ async function startServer() {
   // === ADMIN API ROUTES ===
 
 async function processUpdate(update: any) {
-
   try {
+    let chatId = "";
+    if (update.message) chatId = update.message.chat?.id?.toString() || "";
+    if (update.callback_query) chatId = update.callback_query.message?.chat?.id?.toString() || "";
+
+    const db = await readDB();
+    const isAdmin = chatId === db.settings.adminChatId || (process.env.ADMIN_CHAT_ID && chatId === process.env.ADMIN_CHAT_ID);
+
     if (update.message) {
       const message = update.message;
-      const chatId = message.chat.id.toString();
       const text = message.text || "";
       const from = message.from;
 
-      const db = await readDB();
       let user = db.users.find((u) => u.id === chatId);
 
       // Create or update user

@@ -9,6 +9,7 @@
     "start": "node dist/server.cjs"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "express": "^4.21.2"
   },
   "devDependencies": {
