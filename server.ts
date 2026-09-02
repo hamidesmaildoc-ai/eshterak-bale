@@ -187,7 +187,7 @@ async function processUpdate(update: any) {
         await writeDB(db);
         await sendBaleMessage(
           chatId,
-          `سلام ${from?.first_name || ""}! 👋\nبه ربات فروش اشتراک خوش آمدید.\nبرای مشاهده پلن‌ها از منوی زیر استفاده کنید.`,
+          `سلام ${from?.first_name || ""}! 👋\nبه ربات فروش اشتراک خوش آمدید.\nبرای مشاهده پلن‌ها از منوی زیر استفاده کنید.\n\n(شناسه کاربری شما: ${chatId})`,
           {
             inline_keyboard: [
               [{ text: "🛒 مشاهده پلن‌های اشتراک", callback_data: "show_plans" }],
