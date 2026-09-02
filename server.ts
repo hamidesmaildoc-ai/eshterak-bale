@@ -22,10 +22,19 @@ interface User {
   subscriptionEnd?: string; // ISO Date String
 }
 
+interface Discount {
+  id: string;
+  code: string;
+  percent: number;
+  uses: number;
+  maxUses: number;
+}
+
 interface DB {
   plans: Plan[];
   users: User[];
   transactions: any[];
+  discounts: Discount[];
   settings: {
     cardNumber: string;
     adminChatId: string;
@@ -51,6 +60,7 @@ const defaultDB: DB = {
   ],
   users: [],
   transactions: [],
+  discounts: [],
   settings: {
     cardNumber: "1234-5678-9012-3456",
     adminChatId: "",
@@ -60,7 +70,9 @@ const defaultDB: DB = {
 async function readDB(): Promise<DB> {
   try {
     const data = await fs.promises.readFile(DB_FILE, "utf-8");
-    return JSON.parse(data) as DB;
+    const db = JSON.parse(data) as DB;
+    if (!db.discounts) db.discounts = [];
+    return db;
   } catch (e) {
     return defaultDB;
   }
@@ -209,6 +221,7 @@ async function processUpdate(update: any) {
                   inline_keyboard: [
                       [{ text: "📊 آمار ربات", callback_data: "admin_stats" }, { text: "💳 شماره کارت", callback_data: "admin_set_card" }],
                       [{ text: "➕ افزودن پلن", callback_data: "admin_add_plan" }, { text: "❌ حذف پلن", callback_data: "admin_delete_plan" }],
+                      [{ text: "🎟 مدیریت تخفیف‌ها", callback_data: "admin_discounts" }],
                       [{ text: "📣 ارسال پیام همگانی", callback_data: "admin_broadcast" }],
                       [{ text: "🎁 تخصیص اشتراک دستی", callback_data: "admin_manual_sub" }],
                       [{ text: "🔍 جستجوی کاربر", callback_data: "admin_search_user" }]
@@ -270,6 +283,55 @@ async function processUpdate(update: any) {
               user.stateData = "";
               await writeDB(db);
               await sendBaleMessage(chatId, `✅ پلن جدید "${newPlan.name}" با موفقیت اضافه شد!`);
+          } catch (e) {
+              user.botState = 'IDLE';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "❌ خطایی رخ داد. عملیات لغو شد.");
+          }
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_ADD_DISCOUNT_CODE') {
+          user.stateData = text.trim();
+          user.botState = 'ADMIN_ADD_DISCOUNT_PERCENT';
+          await writeDB(db);
+          await sendBaleMessage(chatId, "📉 لطفاً درصد تخفیف را وارد کنید (فقط عدد، مثلا 20 برای 20٪):");
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_ADD_DISCOUNT_PERCENT') {
+          const percent = parseInt(text);
+          if (isNaN(percent) || percent <= 0 || percent > 100) {
+              await sendBaleMessage(chatId, "❌ درصد تخفیف نامعتبر است. فقط یک عدد بین 1 تا 100 وارد کنید:");
+              return;
+          }
+          user.stateData = JSON.stringify({ code: user.stateData, percent: percent });
+          user.botState = 'ADMIN_ADD_DISCOUNT_USES';
+          await writeDB(db);
+          await sendBaleMessage(chatId, "👥 لطفاً تعداد مجاز استفاده از این کد را وارد کنید (مثلا 100):");
+          return;
+      }
+      
+      if (user.botState === 'ADMIN_ADD_DISCOUNT_USES') {
+          const maxUses = parseInt(text);
+          if (isNaN(maxUses) || maxUses <= 0) {
+              await sendBaleMessage(chatId, "❌ تعداد نامعتبر است. فقط یک عدد بزرگتر از 0 وارد کنید:");
+              return;
+          }
+          try {
+              const data = JSON.parse(user.stateData);
+              if (!db.discounts) db.discounts = [];
+              db.discounts.push({
+                  id: `disc_${Date.now()}`,
+                  code: data.code,
+                  percent: data.percent,
+                  uses: 0,
+                  maxUses: maxUses
+              });
+              user.botState = 'IDLE';
+              user.stateData = "";
+              await writeDB(db);
+              await sendBaleMessage(chatId, `✅ کد تخفیف "${data.code}" با ${data.percent}٪ تخفیف (ظرفیت ${maxUses} نفر) با موفقیت ثبت شد.`);
           } catch (e) {
               user.botState = 'IDLE';
               await writeDB(db);
@@ -372,10 +434,67 @@ async function processUpdate(update: any) {
           return;
       }
 
-      if (user.botState === 'AWAITING_RECEIPT') {
+      if (user.botState === 'AWAITING_DISCOUNT_CODE') {
           const planId = user.stateData;
+          const plan = db.plans.find(p => p.id === planId);
+          const code = text.trim();
+          const discount = db.discounts ? db.discounts.find(d => d.code.toLowerCase() === code.toLowerCase() && d.uses < d.maxUses) : undefined;
+          
+          user.botState = 'IDLE';
+          
+          if (!plan) {
+              await writeDB(db);
+              return;
+          }
+          
+          if (discount) {
+              const newPrice = plan.price - (plan.price * discount.percent / 100);
+              await writeDB(db);
+              await sendBaleMessage(
+                  chatId,
+                  `✅ کد تخفیف با موفقیت اعمال شد!\n\n💳 مبلغ جدید قابل پرداخت: ${newPrice.toLocaleString('fa-IR')} تومان\nشماره کارت:\n\`${db.settings.cardNumber}\`\n\nپس از واریز، برای ارسال رسید روی دکمه زیر کلیک کنید:`,
+                  {
+                      inline_keyboard: [
+                          [{ text: "📤 ارسال رسید پرداختی", callback_data: `pay_${plan.id}_${discount.id}` }]
+                      ]
+                  }
+              );
+          } else {
+              await writeDB(db);
+              await sendBaleMessage(
+                  chatId,
+                  `❌ کد تخفیف نامعتبر است یا ظرفیت آن به پایان رسیده.\n\n💳 مبلغ قابل پرداخت: ${plan.price.toLocaleString('fa-IR')} تومان\nشماره کارت:\n\`${db.settings.cardNumber}\`\n\nپس از واریز، روی دکمه زیر کلیک کنید:`,
+                  {
+                      inline_keyboard: [
+                          [{ text: "🎁 تلاش مجدد تخفیف", callback_data: `discount_${plan.id}` }],
+                          [{ text: "📤 ارسال رسید (بدون تخفیف)", callback_data: `pay_${plan.id}` }]
+                      ]
+                  }
+              );
+          }
+          return;
+      }
+
+      if (user.botState === 'AWAITING_RECEIPT') {
+          const parts = user.stateData.split("_");
+          const planId = parts[0];
+          const discountId = parts.length > 1 ? parts[1] : null;
+
           if (update.message.photo && update.message.photo.length > 0) {
-              const tx = { id: `tx_${Date.now()}`, userId: chatId, planId, status: 'PENDING', date: new Date().toISOString() };
+              let plan = db.plans.find(p => p.id === planId);
+              let amount = plan ? plan.price : 0;
+              let discountPercent = 0;
+              
+              if (discountId && plan && db.discounts) {
+                  const disc = db.discounts.find(d => d.id === discountId);
+                  if (disc && disc.uses < disc.maxUses) {
+                      amount = plan.price - (plan.price * disc.percent / 100);
+                      discountPercent = disc.percent;
+                      disc.uses += 1;
+                  }
+              }
+
+              const tx = { id: `tx_${Date.now()}`, userId: chatId, planId, discountId, amount, status: 'PENDING', date: new Date().toISOString() };
               db.transactions.push(tx);
               user.botState = 'IDLE';
               await writeDB(db);
@@ -385,10 +504,11 @@ async function processUpdate(update: any) {
               const adminChatId = db.settings.adminChatId || process.env.ADMIN_CHAT_ID;
               if (adminChatId) {
                   await forwardBaleMessage(adminChatId, chatId, message.message_id);
-                  const plan = db.plans.find(p => p.id === planId);
+                  const planMsg = plan?.name || "نامشخص";
+                  const discMsg = discountPercent > 0 ? `\n💰 مبلغ پرداختی: ${amount.toLocaleString('fa-IR')} تومان (با ${discountPercent}٪ تخفیف)` : `\n💰 مبلغ پرداختی: ${amount.toLocaleString('fa-IR')} تومان`;
                   await sendBaleMessage(
                       adminChatId, 
-                      `🔔 **درخواست تایید پرداخت جدید**\nکاربر: ${user.firstName} ${user.lastName || ''} (@${user.username || 'ندارد'})\nپلن: ${plan?.name}\nوضعیت: در انتظار بررسی`,
+                      `🔔 **درخواست تایید پرداخت جدید**\nکاربر: ${user.firstName} ${user.lastName || ''} (@${user.username || 'ندارد'})\nپلن: ${planMsg}${discMsg}\nوضعیت: در انتظار بررسی`,
                       {
                           inline_keyboard: [
                               [{ text: "✅ تایید پرداخت و ارسال لینک", callback_data: `approve_tx_${tx.id}` }],
@@ -515,13 +635,22 @@ async function processUpdate(update: any) {
           if (plan) {
               await sendBaleMessage(
                   chatId, 
-                  `شما **${plan.name}** را انتخاب کردید.\n\n💳 مبلغ قابل پرداخت: ${plan.price.toLocaleString('fa-IR')} تومان\nشماره کارت جهت واریز:\n\`${db.settings.cardNumber}\`\n\nپس از پرداخت، برای ارسال رسید روی دکمه زیر کلیک کنید:`,
+                  `شما **${plan.name}** را انتخاب کردید.\n\n💳 مبلغ قابل پرداخت: ${plan.price.toLocaleString('fa-IR')} تومان\nشماره کارت جهت واریز:\n\`${db.settings.cardNumber}\`\n\nاگر کد تخفیف دارید، روی ثبت کد تخفیف کلیک کنید، در غیر این صورت فیش واریزی را ارسال کنید:`,
                   {
                       inline_keyboard: [
+                          [{ text: "🎁 ثبت کد تخفیف", callback_data: `discount_${plan.id}` }],
                           [{ text: "📤 ارسال رسید پرداختی", callback_data: `pay_${plan.id}` }]
                       ]
                   }
               );
+          }
+      } else if (data.startsWith("discount_")) {
+          const planId = data.replace("discount_", "");
+          if (user) {
+              user.botState = 'AWAITING_DISCOUNT_CODE';
+              user.stateData = planId;
+              await writeDB(db);
+              await sendBaleMessage(chatId, "🎁 لطفاً کد تخفیف خود را تایپ کرده و ارسال کنید:");
           }
       } else if (data.startsWith("pay_")) {
           const planId = data.replace("pay_", "");
@@ -555,6 +684,10 @@ async function processUpdate(update: any) {
           if (txIndex > -1) {
               const tx = db.transactions[txIndex];
               tx.status = 'REJECTED';
+              if (tx.discountId && db.discounts) {
+                  const disc = db.discounts.find(d => d.id === tx.discountId);
+                  if (disc && disc.uses > 0) disc.uses -= 1;
+              }
               await writeDB(db);
               await sendBaleMessage(tx.userId, "❌ متاسفانه پرداخت شما تایید نشد. اگر مشکلی پیش آمده روی دکمه پشتیبانی کلیک کنید.", {
                   inline_keyboard: [
@@ -591,6 +724,47 @@ async function processUpdate(update: any) {
               db.plans = db.plans.filter(p => p.id !== pId);
               await writeDB(db);
               await sendBaleMessage(chatId, "✅ پلن با موفقیت حذف شد.");
+          }
+      } else if (data === "admin_discounts") {
+          if (isAdmin) {
+              let msg = "🎟 **لیست کدهای تخفیف:**\n\n";
+              if (db.discounts && db.discounts.length > 0) {
+                  db.discounts.forEach(d => {
+                      msg += `- کد: \`${d.code}\` | ${d.percent}٪ تخفیف | استفاده: ${d.uses}/${d.maxUses} \n`;
+                  });
+              } else {
+                  msg += "هیچ کد تخفیفی ثبت نشده است.\n";
+              }
+              await sendBaleMessage(chatId, msg, {
+                  inline_keyboard: [
+                      [{ text: "➕ افزودن کد تخفیف", callback_data: "admin_add_discount" }],
+                      [{ text: "❌ حذف کد تخفیف", callback_data: "admin_delete_discount" }]
+                  ]
+              });
+          }
+      } else if (data === "admin_add_discount") {
+          if (isAdmin) {
+              user.botState = 'ADMIN_ADD_DISCOUNT_CODE';
+              await writeDB(db);
+              await sendBaleMessage(chatId, "🎟 **افزودن کد تخفیف جدید**\n\nلطفاً کد تخفیف را وارد کنید (مثلاً: YALDA):");
+          }
+      } else if (data === "admin_delete_discount") {
+          if (isAdmin) {
+              if (!db.discounts || db.discounts.length === 0) {
+                  await sendBaleMessage(chatId, "❌ هیچ کد تخفیفی برای حذف وجود ندارد.");
+                  return;
+              }
+              const buttons = db.discounts.map(d => [{ text: `❌ حذف: ${d.code}`, callback_data: `admin_del_disc_${d.id}` }]);
+              await sendBaleMessage(chatId, "🗑 **کدام کد تخفیف را می‌خواهید حذف کنید؟**", { inline_keyboard: buttons });
+          }
+      } else if (data.startsWith("admin_del_disc_")) {
+          if (isAdmin) {
+              const dId = data.replace("admin_del_disc_", "");
+              if (db.discounts) {
+                  db.discounts = db.discounts.filter(d => d.id !== dId);
+                  await writeDB(db);
+              }
+              await sendBaleMessage(chatId, "✅ کد تخفیف با موفقیت حذف شد.");
           }
       } else if (data === "admin_broadcast") {
           if (isAdmin) {
